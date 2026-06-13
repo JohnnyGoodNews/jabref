@@ -65,7 +65,28 @@ public class ExportService {
         return new Exporter("bibtex", "BibTex", StandardFileType.BIBTEX_DB) {
             @Override
             public void export(BibDatabaseContext databaseContext, Path file, List<BibEntry> entries) throws IOException {
-                internalSaveDatabaseContext(new BibDatabaseContext(new BibDatabase(entries)), file);
+                if (!FileUtil.isBibFile(file)) {
+                    printOut(Localization.lang("Invalid output file type provided."));
+                }
+                try (AtomicFileWriter fileWriter = new AtomicFileWriter(file, StandardCharsets.UTF_8)) {
+                    BibWriter bibWriter = new BibWriter(fileWriter, OS.NEWLINE);
+                    SelfContainedSaveConfiguration saveConfiguration = (SelfContainedSaveConfiguration) new SelfContainedSaveConfiguration()
+                            .withReformatOnSave(cliPreferences.getLibraryPreferences().shouldAlwaysReformatOnSave());
+                    BibDatabaseWriter databaseWriter = new BibDatabaseWriter(
+                            bibWriter,
+                            saveConfiguration,
+                            cliPreferences.getFieldPreferences(),
+                            cliPreferences.getCitationKeyPatternPreferences(),
+                            entryTypesManager);
+                    databaseWriter.writePartOfDatabase(databaseContext, entries);
+
+                    // Show just a warning message if encoding did not work for all characters:
+                    if (fileWriter.hasEncodingProblems()) {
+                        printErr(Localization.lang("UTF-8 could not be used to encode the following characters: %0",
+                                fileWriter.getEncodingProblems()));
+                    }
+                    printOut(Localization.lang("Saved %0.", file));
+                }
             }
         };
     }
@@ -86,7 +107,7 @@ public class ExportService {
 
     public void printDatabaseContextToStdOut(BibDatabaseContext bibDatabaseContext) throws ExportServiceException {
         try (OutputStreamWriter writer = new OutputStreamWriter(System.out, StandardCharsets.UTF_8)) {
-            generateCitationKeys(bibDatabaseContext, cliPreferences.getCitationKeyPatternPreferences());
+            generateMissingCitationKeys(bibDatabaseContext, cliPreferences.getCitationKeyPatternPreferences());
             BibDatabaseWriter bibWriter = new BibDatabaseWriter(writer, bibDatabaseContext, cliPreferences);
             bibWriter.writeDatabase(bibDatabaseContext);
         } catch (IOException ex) {
@@ -114,41 +135,12 @@ public class ExportService {
             BibDatabaseContext bibDatabaseContext,
             Path outputFile) throws ExportServiceException {
 
-        try {
-            internalSaveDatabaseContext(bibDatabaseContext, outputFile);
-        } catch (IOException ex) {
-            throw new ExportServiceException("Unable to write to " + outputFile,
-                    Localization.lang("Unable to write to %0.", outputFile),
-                    ex, CommandLine.ExitCode.SOFTWARE);
-        }
-    }
-
-    private void internalSaveDatabaseContext(
-            BibDatabaseContext bibDatabaseContext,
-            Path outputFile) throws IOException {
-
-        if (!FileUtil.isBibFile(outputFile)) {
-            printOut(Localization.lang("Invalid output file type provided."));
-        }
-        try (AtomicFileWriter fileWriter = new AtomicFileWriter(outputFile, StandardCharsets.UTF_8)) {
-            BibWriter bibWriter = new BibWriter(fileWriter, OS.NEWLINE);
-            SelfContainedSaveConfiguration saveConfiguration = (SelfContainedSaveConfiguration) new SelfContainedSaveConfiguration()
-                    .withReformatOnSave(cliPreferences.getLibraryPreferences().shouldAlwaysReformatOnSave());
-            BibDatabaseWriter databaseWriter = new BibDatabaseWriter(
-                    bibWriter,
-                    saveConfiguration,
-                    cliPreferences.getFieldPreferences(),
-                    cliPreferences.getCitationKeyPatternPreferences(),
-                    entryTypesManager);
-            databaseWriter.writeDatabase(bibDatabaseContext);
-
-            // Show just a warning message if encoding did not work for all characters:
-            if (fileWriter.hasEncodingProblems()) {
-                printErr(Localization.lang("UTF-8 could not be used to encode the following characters: %0",
-                        fileWriter.getEncodingProblems()));
-            }
-            printOut(Localization.lang("Saved %0.", outputFile));
-        }
+        tryExportWithExporter(
+                bibtexExporter,
+                outputFile,
+                bibDatabaseContext,
+                bibDatabaseContext.getEntries(),
+                bibDatabaseContext.getFileDirectories(cliPreferences.getFilePreferences()));
     }
 
     public void exportEntriesToFile(
@@ -163,33 +155,33 @@ public class ExportService {
         );
     }
 
-    public void exportBibDatabaseContextToFile(
-            BibDatabaseContext databaseContext,
-            List<BibEntry> matches,
-            Path outputFile,
-            String outputFormat) throws ExportServiceException {
-
-        Exporter exporter = getExporterByName(outputFormat);
-        tryExportWithExporter(exporter, outputFile, databaseContext, matches, List.of());
-    }
-
     public void exportParserResultToFile(
             ParserResult parserResult,
             Path outputFile,
             String format) throws ExportServiceException {
 
-        Optional<Path> path = parserResult.getPath().map(Path::toAbsolutePath);
         BibDatabaseContext databaseContext = parserResult.getDatabaseContext();
-        path.ifPresent(databaseContext::setDatabasePath);
-        List<Path> fileDirForDatabase = databaseContext
-                .getFileDirectories(cliPreferences.getFilePreferences());
-
         List<BibEntry> entries = databaseContext.getDatabase().getEntries();
 
-        Exporter exporter = getExporterByName(format);
-        tryExportWithExporter(exporter, outputFile, databaseContext, entries, fileDirForDatabase);
+        Optional<Path> path = parserResult.getPath().map(Path::toAbsolutePath);
+        path.ifPresent(databaseContext::setDatabasePath);
+
+        exportBibDatabaseContextToFile(databaseContext, entries, outputFile, format);
     }
 
+    public void exportBibDatabaseContextToFile(
+            BibDatabaseContext databaseContext,
+            List<BibEntry> matches,
+            Path outputFile,
+            String format) throws ExportServiceException {
+
+        Exporter exporter = getExporterByName(format);
+        List<Path> fileDirForDatabase = databaseContext
+                .getFileDirectories(cliPreferences.getFilePreferences());
+        tryExportWithExporter(exporter, outputFile, databaseContext, matches, fileDirForDatabase);
+    }
+
+    /// Central method to control export behavior (all exporting/saving should use this entrypoint).
     private void tryExportWithExporter(
             Exporter exporter,
             Path outputFile,
@@ -199,6 +191,7 @@ public class ExportService {
 
         try {
             JournalAbbreviationRepository abbreviationRepository = Injector.instantiateModelOrService(JournalAbbreviationRepository.class);
+            generateMissingCitationKeys(databaseContext, cliPreferences.getCitationKeyPatternPreferences());
             printOut(Localization.lang("Exporting '%0'.", outputFile.toAbsolutePath().toString()));
             exporter.export(databaseContext, outputFile, entries, fileDirForDatabase, abbreviationRepository);
         } catch (IOException | SaveException | ParserConfigurationException | TransformerException ex) {
@@ -220,7 +213,7 @@ public class ExportService {
     }
 
     /// Generates a citation key if there is no key existing
-    private static void generateCitationKeys(
+    private static void generateMissingCitationKeys(
             BibDatabaseContext databaseContext,
             CitationKeyPatternPreferences citationKeyPatternPreferences) {
 

@@ -8,6 +8,9 @@ import org.jabref.logic.exporter.BibDatabaseWriter;
 import org.jabref.logic.exporter.ExportPreferences;
 import org.jabref.logic.exporter.SelfContainedSaveConfiguration;
 import org.jabref.logic.importer.ParserResult;
+import org.jabref.model.database.BibDatabaseContext;
+import org.jabref.model.entry.BibEntry;
+import org.jabref.model.entry.field.StandardField;
 import org.jabref.model.metadata.SaveOrder;
 import org.jabref.model.metadata.SelfContainedSaveOrder;
 import org.jabref.toolkit.commands.AbstractJabKitTest;
@@ -81,5 +84,47 @@ class ExportServiceTest extends AbstractJabKitTest {
         new ExportService(preferences, false).exportParserResultToFile(parserResult, outputHtml, "tablerefsabsbib");
 
         assertFileExists(outputHtml);
+    }
+
+    @Test
+    void savingDatabaseContextPreservesCitationKeys(@TempDir Path tempDir) throws Exception {
+        Path source = getClassResourceAsPath("origin.bib").toAbsolutePath();
+        ParserResult parserResult = ImportService.importBibTexFile(source, preferences, true);
+        BibDatabaseContext databaseContext = parserResult.getDatabaseContext();
+
+        new ExportService(preferences, false)
+                .saveDatabaseContext(databaseContext, tempDir.resolve("output.bib"));
+
+        assertFileExists(tempDir.resolve("output.bib"));
+        assertTrue(Files.readString(tempDir.resolve("output.bib")).contains("Darwin1888"));
+    }
+
+    @Test
+    void exportDatabaseContextPreservesCitationKeys(@TempDir Path tempDir) throws Exception {
+        Path source = getClassResourceAsPath("origin.bib").toAbsolutePath();
+        ParserResult parserResult = ImportService.importBibTexFile(source, preferences, true);
+        BibDatabaseContext databaseContext = parserResult.getDatabaseContext();
+        new ExportService(preferences, false)
+                .exportBibDatabaseContextToFile(databaseContext, databaseContext.getEntries(),
+                        tempDir.resolve("output.bib"), "bibtex");
+
+        assertFileExists(tempDir.resolve("output.bib"));
+        assertTrue(Files.readString(tempDir.resolve("output.bib")).contains("Darwin1888"));
+    }
+
+    @Test
+    void exportGeneratesCitationKeys(@TempDir Path tempDir) throws Exception {
+        List<BibEntry> entries = List.of(new BibEntry()
+                .withField(StandardField.TITLE, "my ﬁrst research")
+                .withField(StandardField.DOI, "10.1000/xyz123")
+                .withField(StandardField.AUTHOR, "Jane Doe")
+                .withField(StandardField.YEAR, "2023")
+                .withChanged(true));
+
+        new ExportService(preferences, false)
+                .exportEntriesToFile(entries, tempDir.resolve("output.bib"), "bibtex");
+
+        assertFileExists(tempDir.resolve("output.bib"));
+        assertTrue(Files.readString(tempDir.resolve("output.bib")).contains("Doe2023"));
     }
 }
