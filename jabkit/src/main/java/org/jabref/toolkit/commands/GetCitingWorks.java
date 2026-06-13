@@ -50,6 +50,7 @@ class GetCitingWorks implements Callable<Integer> {
     @CommandLine.Option(
             names = "--provider",
             converter = CitationFetcherTypeConverter.class,
+            completionCandidates = CitationFetcherTypeConverter.FetcherNames.class,
             description = "Metadata provider: ${COMPLETION-CANDIDATES}"
     )
     private CitationFetcherType citationFetcherType = CitationFetcherType.OPEN_CITATIONS;
